@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>現場Navi 3D - 統合管理システム</title>
+  
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.110/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.110/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css"/>
+  <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
+
+  <style>
+    body { margin: 0; padding: 0; overflow: hidden; font-family: 'Hiragino Kaku Gothic ProN', sans-serif; }
+    #cesiumContainer { width: 100%; height: 100vh; }
+    
+    /* 写真・パノラマ表示用ウィンドウ */
+    #pano-container {
+      display: none; position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%, -50%); width: 85%; height: 75%;
+      background: #000; z-index: 1000; border: 4px solid #fff;
+      box-shadow: 0 0 50px rgba(0,0,0,0.9);
+    }
+    
+    #panorama, #regular-photo { width: 100%; height: 100%; }
+    #regular-photo { display: none; object-fit: contain; background: #1a1a1a; }
+
+    #close-btn {
+      position: absolute; top: 12px; right: 12px; z-index: 1001;
+      background: #e74c3c; color: white; border: none; padding: 12px 24px;
+      cursor: pointer; font-weight: bold; border-radius: 4px; font-size: 16px;
+    }
+
+    /* 案内パネル（凡例） */
+    #info-panel {
+      position: absolute; top: 20px; left: 20px; background: rgba(25, 25, 25, 0.9);
+      color: white; padding: 18px; border-radius: 10px; z-index: 500; font-size: 14px;
+      line-height: 1.8; border-left: 6px solid #3498db;
+    }
+
+    /* パノラマ内：寸法表示ラベル */
+    .dimension-label {
+        background-color: rgba(255, 235, 59, 0.95);
+        color: #c0392b;
+        border: 2px solid #c0392b;
+        padding: 4px 10px;
+        font-size: 15px;
+        font-weight: bold;
+        border-radius: 4px;
+        box-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+    }
+  </style>
+</head>
+
+<body>
+  <div id="info-panel">
+    <b style="font-size: 16px;">【現場Navi 3D】</b><br>
+    <span style="color: #3498db;">■</span> <b>青枠エリア</b>：計画敷地（半透明）<br>
+    📍 <b>赤ピン</b>：360°パノラマ画像<br>
+    📷 <b>カメラ</b>：施工写真(単体)<br>
+    📝 <b>ノート</b>：管理メモ<br>
+    <hr style="border: 0; border-top: 1px solid #555; margin: 10px 0;">
+    <small>※マップをクリックで座標を取得(F12)</small>
+  </div>
+  
+  <div id="cesiumContainer"></div>
+  
+  <div id="pano-container">
+    <button id="close-btn" onclick="closePano()">× 閉じる</button>
+    <div id="panorama"></div>
+    <img id="regular-photo" src="">
+  </div>
+
+  <script>
+    // ==============================================
+    // 1. 基本設定（キーを貼り付けてください）
+    // ==============================================
+    const CESIUM_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJhNGNjZDY5Ni00OTZmLTRkYjUtOWU0Yi02NTYzYmZmYTQzYWMiLCJpZCI6Mzc5MDEzLCJpYXQiOjE3Njg0NzM2MjR9.FKr4TDitEebTSNkEdy_VJ0NjYNkGfztPrcf1VDyBs30'; 
+    const GOOGLE_API_KEY = 'AIzaSyAaEXs0u7x4V2k_elvzlEJTWPkJoCYuLGU';
+
+    const ICONS = {
+        '360': 'https://img.icons8.com/color/48/marker.png',
+        'photo': 'https://img.icons8.com/fluency/48/camera.png',
+        'memo': 'https://img.icons8.com/color/48/note.png',
+        'default': 'https://img.icons8.com/color/48/marker.png'
+    };
+
+    Cesium.Ion.defaultAccessToken = CESIUM_TOKEN;
+    const viewer = new Cesium.Viewer('cesiumContainer', {
+      baseLayerPicker: false, timeline: false, animation: false,
+      geocoder: false, homeButton: false, sceneModePicker: false
+    });
+
+    async function initMap() {
+      try {
+        const tileset = await Cesium.createGooglePhotorealistic3DTileset(GOOGLE_API_KEY);
+        viewer.scene.primitives.add(tileset);
+        
+        // 初期の視点設定（緯度, 経度, 高度）
+        viewer.camera.flyTo({
+          destination: Cesium.Cartesian3.fromDegrees(135.5625, 34.5193, 600),
+          orientation: { pitch: Cesium.Math.toRadians(-35.0) }
+        });
+      } catch (e) { console.error(e); }
+    }
+    initMap();
+
+    // ==============================================
+    // 2. 敷地境界・地点追加関数
+    // ==============================================
+
+    // 敷地境界を描画（塗りつぶしを半透明にする設定済み）
+    function addSiteBoundary(coords, color) {
+      viewer.entities.add({
+        polygon: {
+          hierarchy: Cesium.Cartesian3.fromDegreesArray(coords),
+          // 【重要】alpha: 0.3（30%の透明度）に設定
+          material: color.withAlpha(0.3),
+          classificationType: Cesium.ClassificationType.BOTH
+        },
+        polyline: {
+          positions: Cesium.Cartesian3.fromDegreesArray(coords.concat([coords[0], coords[1]])),
+          width: 5,
+          material: color,
+          clampToGround: true,
+          classificationType: Cesium.ClassificationType.BOTH
+        }
+      });
+    }
+
+    // ピン・カメラ地点を追加
+    function addPoint(lat, lon, height, name, type, imgFile, hotspots = []) {
+      const iconImage = ICONS[type] || ICONS['default'];
+      const entity = viewer.entities.add({
+        position: Cesium.Cartesian3.fromDegrees(lon, lat, height),
+        billboard: {
+          image: iconImage, verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+          heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND,
+          width: 42, height: 42,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY // 建物に埋もれない
+        },
+        name: name
+      });
+      entity.customData = { type: type, url: `./${imgFile}`, hotspots: hotspots };
+    }
+
+    // ==============================================
+    // 3. インタラクション（クリック処理）
+    // ==============================================
+    const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+    let panoViewer = null;
+
+    handler.setInputAction(function(click) {
+      const picked = viewer.scene.pick(click.position);
+      
+      if (Cesium.defined(picked) && picked.id && picked.id.customData) {
+        const data = picked.id.customData;
+        document.getElementById('pano-container').style.display = 'block';
+
+        if (data.type === '360') {
+          document.getElementById('panorama').style.display = 'block';
+          document.getElementById('regular-photo').style.display = 'none';
+          if (panoViewer) panoViewer.destroy();
+          panoViewer = pannellum.viewer('panorama', {
+            "type": "equirectangular", "panorama": data.url, "autoLoad": true,
+            "hotSpots": data.hotspots, "hotSpotDebug": true
+          });
+        } else if (data.type === 'photo') {
+          document.getElementById('panorama').style.display = 'none';
+          document.getElementById('regular-photo').style.display = 'block';
+          document.getElementById('regular-photo').src = data.url;
+        }
+      } else {
+        const cartesian = viewer.scene.pickPosition(click.position);
+        if (cartesian) {
+          const carto = Cesium.Cartographic.fromCartesian(cartesian);
+          // F12コンソールに経度, 緯度の順で出力（コピペ用）
+          console.log(`${Cesium.Math.toDegrees(carto.longitude).toFixed(6)}, ${Cesium.Math.toDegrees(carto.latitude).toFixed(6)}`);
+        }
+      }
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+    function closePano() {
+      document.getElementById('pano-container').style.display = 'none';
+      if (panoViewer) panoViewer.destroy();
+      document.getElementById('regular-photo').src = "";
+    }
+
+    // ==============================================
+    // 4. データ登録エリア（ここを書き換えてください）
+    // ==============================================
+
+    // 【敷地境界：経度, 緯度の順で角の座標を並べる】
+    const siteArea = [
+        135.562202, 34.520518,
+        135.561936, 34.520434,
+        135.561908, 34.519963,
+        135.561638, 34.519947,
+        135.561638, 34.519947,
+        135.561274, 34.519854,
+        135.561310, 34.519892,
+        135.561406, 34.519511,
+        135.560659, 34.519415,
+        135.560349, 34.519466,
+        135.560304, 34.519297,
+        135.560363, 34.519257,
+        135.561432, 34.519372,
+        135.561589, 34.519266,
+        135.561789, 34.518093,
+        135.562428, 34.517798,
+        135.562642, 34.517779,
+        135.562880, 34.517236,
+        135.563184, 34.517281,
+        135.562997, 34.517776,
+        135.562826, 34.518079,
+        135.563055, 34.518114,
+        135.563060, 34.518577,
+        135.562912, 34.519236,
+        135.562893, 34.519587,
+        135.562871, 34.519767,
+        135.562782, 34.520039,
+        135.562579, 34.520239,
+        135.562401, 34.520286,
+
+
+    ];
+    addSiteBoundary(siteArea, Cesium.Color.SKYBLUE);
+
+    // 【360度パノラマ：赤ピン】
+    addPoint(34.519329, 135.562531, 98.0, "テストパノラマ地点", "360", "view01.JPG", [
+        { pitch: -10, yaw: 170, text: "梁下: 2,800mm", cssClass: "dimension-label" }
+    ]);
+
+    // 1地点目
+    addPoint(34.517793, 135.562679, 95.66, "画像①", "photo", "IMG_0433.PNG", []);
+
+    // 2地点目
+    addPoint(34.517329, 135.562961, 98.06, "画像②", "photo", "IMG_0434.PNG", []);
+
+    // 3地点目
+    addPoint(34.517610, 135.562945, 96.54, "画像③", "photo", "IMG_0435.PNG", []);
+
+    // 4地点目
+    addPoint(34.518484, 135.562452, 95.21, "画像④", "photo", "IMG_0436.PNG", []);
+
+    // 5地点目
+    addPoint(34.518573, 135.562393, 95.05, "画像⑤", "photo", "IMG_0437.PNG", []);
+
+    // 6地点目
+    addPoint(34.519045, 135.562227, 94.62, "画像⑥", "photo", "IMG_0438.PNG", []);
+
+    // 7地点目
+    addPoint(34.520433, 135.562157, 94.36, "画像⑦", "photo", "IMG_0439.PNG", []);
+
+    // 8地点目
+    addPoint(34.520422, 135.561945, 94.31, "画像⑧", "photo", "IMG_0440.PNG", []);
+
+　　// 9地点目
+    addPoint(34.518007, 135.562379, 96.87, "360度1", "360", "1.JPG", []);
+
+    // 10地点目
+    addPoint(34.518116, 135.561823, 98.94, "360度2", "360", "2.JPG", []);
+
+    // 11地点目
+    addPoint(34.519276, 135.561624, 99.21, "360度3", "360", "3.JPG", []);
+
+    // 12地点目
+    addPoint(34.519273, 135.561905, 99.63, "360度4", "360", "4.JPG", []);
+
+    // 13地点目
+    addPoint(34.519294, 135.562324, 99.60, "360度5", "360", "5.JPG", []);
+
+    // 14地点目
+    addPoint(34.519005, 135.562643, 98.15, "360度6", "360", "6.JPG", []);
+
+    // 15地点目
+    addPoint(34.518703, 135.562626, 99.14, "360度7", "360", "7.JPG", []);
+
+    // 16地点目
+    addPoint(34.518638, 135.562783, 99.06, "360度8", "360", "8.JPG", []);
+
+    // 17地点目
+    addPoint(34.518721, 135.562922, 98.95, "360度9", "360", "9.JPG", []);
+
+    // 18地点目
+    addPoint(34.518932, 135.562879, 98.75, "360度10", "360", "10.JPG", []);
+
+    // 19地点目
+    addPoint(34.519686, 135.562554, 97.22, "360度11", "360", "11.JPG", []);
+
+    // 20地点目
+    addPoint(34.520166, 135.562517, 97.39, "360度12", "360", "12.JPG", []);
+
+    // 21地点目
+    addPoint(34.519261, 135.562070, 99.74, "360度13", "360", "13.JPG", []);
+
+    // 22地点目
+    addPoint(34.518478, 135.562445, 95.21, "360度14", "360", "14.JPG", []);
+ 
+    // 23地点目
+    addPoint(34.518729, 135.562317, 95.10, "360度15", "360", "15.JPG", []);
+
+    // 24地点目
+    addPoint(34.520384, 135.561967, 94.33, "360度16", "360", "16.JPG", []);
+ 
+    // 25地点目
+    addPoint(34.517855, 135.562653, 95.64, "360度17", "360", "17.JPG", []);
+
+    // 26地点目
+    addPoint(34.519481, 135.561595, 95.46, "360度18", "360", "18.JPG", []);
+
+    // 25地点目
+    addPoint(34.519039, 135.562231, 94.66, "360度19", "360", "19.JPG", []);
+
+    // 26地点目
+    addPoint(34.517296, 135.562873, 97.87, "360度21", "360", "21.JPG", []);
+
+    // 27地点目
+    addPoint(34.520435, 135.562154, 94.38, "360度22", "360", "22.JPG", []);
+
+    // 28地点目
+    addPoint(34.517363, 135.563045, 97.94, "360度23", "360", "23.JPG", []);
+
+
+  </script>
+</body>
+</html>
